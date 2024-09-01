@@ -1,15 +1,17 @@
 import 'dart:convert';
 
+import 'package:talkjs_flutter/src/themeoptions.dart';
+
 import './chatbox.dart';
 
 /// The values that dictate the chat direction.
 enum TextDirection {
   /// right-to-left
   rtl,
+
   /// left-to-right
   ltr,
 }
-
 
 /// Settings that affect the behavior of the message field
 class MessageFieldOptions {
@@ -43,11 +45,17 @@ class MessageFieldOptions {
   final bool? spellcheck;
 
   /// This makes the Message Field visible
-  /// 
+  ///
   /// Defaults to true
   final bool visible;
 
-  const MessageFieldOptions({this.autofocus, this.enterSendsMessage, this.placeholder, this.spellcheck, this.visible = true});
+  const MessageFieldOptions({
+    this.autofocus,
+    this.enterSendsMessage,
+    this.placeholder,
+    this.spellcheck,
+    // this.visible = true,
+  });
 
   Map<String, dynamic> toJson() {
     final result = <String, dynamic>{};
@@ -60,15 +68,15 @@ class MessageFieldOptions {
       }
     }
 
-    if (autofocus != null) {
+    if (enterSendsMessage != null) {
       result['enterSendsMessage'] = enterSendsMessage;
     }
 
-    if (autofocus != null) {
+    if (placeholder != null) {
       result['placeholder'] = placeholder;
     }
 
-    if (autofocus != null) {
+    if (spellcheck != null) {
       result['spellcheck'] = spellcheck;
     }
 
@@ -109,7 +117,13 @@ class MessageFieldOptions {
     return true;
   }
 
-  int get hashCode => Object.hash(autofocus, enterSendsMessage, placeholder, spellcheck, visible);
+  int get hashCode => Object.hash(
+        autofocus,
+        enterSendsMessage,
+        placeholder,
+        spellcheck,
+        // visible,
+      );
 }
 
 /// The possible values for showTranslationToggle
@@ -171,6 +185,8 @@ class ChatBoxOptions {
   /// Overrides the theme used for this chat UI.
   final String? theme;
 
+  final ThemeOptions? themeOptions;
+
   /// TODO: thirdparties
 
   /// Enables conversation translation with Google Translate.
@@ -182,17 +198,12 @@ class ChatBoxOptions {
     this.showChatHeader,
     this.showTranslationToggle,
     this.theme,
+    this.themeOptions,
     this.translateConversations,
   });
 
-  /// For internal use only. Implementation detail that may change anytime.
-  ///
-  /// This method is used instead of toJson, as we need to output valid JS
-  /// that is not valid JSON.
-  /// The toJson method is intentionally omitted, to produce an error if
-  /// someone tries to convert this object to JSON instead of using the
-  /// getJsonString method.
-  String getJsonString(ChatBoxState chatBox) {
+  @override
+  String toString() {
     final result = <String, dynamic>{};
 
     if (dir != null) {
@@ -212,15 +223,15 @@ class ChatBoxOptions {
       result['showTranslationToggle'] = showTranslationToggle!.getValue();
     }
 
-    if (theme != null) {
+    if (themeOptions != null) {
+      result['theme'] = themeOptions?.toJson();
+    } else if (theme != null) {
       result['theme'] = theme;
     }
 
     if (translateConversations != null) {
       result['translateConversations'] = translateConversations!.getValue();
     }
-
-    chatBox.setExtraOptions(result);
 
     return json.encode(result);
   }
@@ -262,12 +273,11 @@ class ChatBoxOptions {
   }
 
   int get hashCode => Object.hash(
-    dir,
-    messageField,
-    showChatHeader,
-    showTranslationToggle,
-    theme,
-    translateConversations,
-  );
+        dir,
+        messageField,
+        showChatHeader,
+        showTranslationToggle,
+        theme,
+        translateConversations,
+      );
 }
-

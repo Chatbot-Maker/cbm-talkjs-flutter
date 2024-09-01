@@ -1,11 +1,11 @@
 name: talkjs_flutter
 description: Official TalkJS SDK for Flutter
-version: 0.7.0
+version: 0.13.0
 homepage: https://talkjs.com
 
 environment:
-  sdk: ">=2.15.0 <3.0.0"
-  flutter: ">=2.8.1"
+  sdk: '>=2.19.0 <4.0.0'
+  flutter: '>=2.8.1'
 
 platforms:
   android:
@@ -15,19 +15,25 @@ dependencies:
   flutter:
     sdk: flutter
 
-  talkjs_flutter_inappwebview: ^6.0.2
-  crypto: ^3.0.2
-  firebase_core: ^2.4.1
-  firebase_messaging: ^14.2.1
-  flutter_local_notifications: ^13.0.0
-  http: ^0.13.5
+  talkjs_flutter_inappwebview: ^6.0.8
+  crypto: ^3.0.3
+  firebase_core: ^3.1.0
+  firebase_messaging: ^15.0.1
+  flutter_local_notifications: ^17.1.2
+  http: '>=0.13.6 <2.0.0'
   flutter_apns_only: ^1.6.0
-  permission_handler: ^10.2.0
-  url_launcher: ^6.1.9
+  permission_handler: ^11.3.1
+  url_launcher: ^6.3.0
+  shared_preferences: ^2.2.3
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  husky: ^0.1.6
+  lint_staged: ^0.4.2
+
+lint_staged:
+  '**/*.dart': dart format && dart fix --apply
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -35,6 +41,7 @@ dev_dependencies:
 # The following section is specific to Flutter.
 flutter:
   assets:
+    - packages/talkjs_flutter/assets/version.txt
     - packages/talkjs_flutter/assets/index.html
 
   # To add assets to your package, add an assets section, like this:

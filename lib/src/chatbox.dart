@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:talkjs_flutter/src/themeoptions.dart';
 
 import 'package:talkjs_flutter_inappwebview/talkjs_flutter_inappwebview.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -20,10 +21,14 @@ import './predicate.dart';
 import './webview_common.dart';
 
 typedef SendMessageHandler = void Function(SendMessageEvent event);
-typedef TranslationToggledHandler = void Function(TranslationToggledEvent event);
+typedef TranslationToggledHandler = void Function(
+    TranslationToggledEvent event);
 typedef LoadingStateHandler = void Function(LoadingState state);
 typedef MessageActionHandler = void Function(MessageActionEvent event);
-typedef NavigationHandler = UrlNavigationAction Function(UrlNavigationRequest navigationRequest);
+typedef ConversationActionHandler = void Function(
+    ConversationActionEvent event);
+typedef NavigationHandler = UrlNavigationAction Function(
+    UrlNavigationRequest navigationRequest);
 
 class SendMessageEvent {
   final ConversationData conversation;
@@ -31,9 +36,9 @@ class SendMessageEvent {
   final SentMessage message;
 
   SendMessageEvent.fromJson(Map<String, dynamic> json)
-    : conversation = ConversationData.fromJson(json['conversation']),
-    me = UserData.fromJson(json['me']),
-    message = SentMessage.fromJson(json['message']);
+      : conversation = ConversationData.fromJson(json['conversation']),
+        me = UserData.fromJson(json['me']),
+        message = SentMessage.fromJson(json['message']);
 }
 
 class TranslationToggledEvent {
@@ -41,8 +46,8 @@ class TranslationToggledEvent {
   final bool isEnabled;
 
   TranslationToggledEvent.fromJson(Map<String, dynamic> json)
-    : conversation = ConversationData.fromJson(json['conversation']),
-    isEnabled = json['isEnabled'];
+      : conversation = ConversationData.fromJson(json['conversation']),
+        isEnabled = json['isEnabled'];
 }
 
 enum LoadingState { loading, loaded }
@@ -52,8 +57,17 @@ class MessageActionEvent {
   final Message message;
 
   MessageActionEvent.fromJson(Map<String, dynamic> json)
-    : action = json['action'],
-    message = Message.fromJson(json['message']);
+      : action = json['action'],
+        message = Message.fromJson(json['message']);
+}
+
+class ConversationActionEvent {
+  final String action;
+  final ConversationData conversationData;
+
+  ConversationActionEvent.fromJson(Map<String, dynamic> json)
+      : action = json['action'],
+        conversationData = ConversationData.fromJson(json['conversation']);
 }
 
 class UrlNavigationRequest {
@@ -78,18 +92,24 @@ class ChatBox extends StatefulWidget {
   final bool? showChatHeader;
   final TranslationToggle? showTranslationToggle;
   final String? theme;
+  final ThemeOptions? themeOptions;
   final TranslateConversations? translateConversations;
-  final List<String> highlightedWords = const <String>[];
-  final MessagePredicate messageFilter;
+  final List<String> highlightedWords;
+  final BaseMessagePredicate? messageFilter;
+  final String? scrollToMessage;
 
   final Conversation? conversation;
   final bool? asGuest;
+
+  final bool enableZoom;
 
   final SendMessageHandler? onSendMessage;
   final TranslationToggledHandler? onTranslationToggled;
   final LoadingStateHandler? onLoadingStateChanged;
   final Map<String, MessageActionHandler>? onCustomMessageAction;
-  final Future<bool> Function(Uri uri)? overrideUrlLoading;
+  final Map<String, ConversationActionHandler>? onCustomConversationAction;
+  final NavigationHandler? onUrlNavigation;
+  // final Future<bool> Function(Uri uri)? overrideUrlLoading;
 
   const ChatBox({
     Key? key,
@@ -99,16 +119,21 @@ class ChatBox extends StatefulWidget {
     this.showChatHeader,
     this.showTranslationToggle,
     this.theme,
+    this.themeOptions,
     this.translateConversations,
-    //this.highlightedWords = const <String>[], // Commented out due to bug #1953
-    this.messageFilter = const MessagePredicate(),
+    this.highlightedWords = const <String>[],
+    this.messageFilter,
     this.conversation,
     this.asGuest,
+    this.enableZoom = false,
     this.onSendMessage,
     this.onTranslationToggled,
     this.onLoadingStateChanged,
     this.onCustomMessageAction,
-    this.overrideUrlLoading,
+    this.onCustomConversationAction,
+    this.onUrlNavigation,
+    this.scrollToMessage,
+    // this.overrideUrlLoading,
   }) : super(key: key);
 
   @override
@@ -143,10 +168,26 @@ class ChatBoxState extends State<ChatBox> {
   /// Objects stored for comparing changes
   ChatBoxOptions? _oldOptions;
   List<String> _oldHighlightedWords = [];
-  MessagePredicate _oldMessageFilter = const MessagePredicate();
+  BaseMessagePredicate? _oldMessageFilter;
   bool? _oldAsGuest;
   Conversation? _oldConversation;
-  Set<String> _oldCustomActions = {};
+  Set<String> _oldCustomMessageActions = {};
+  Set<String> _oldCustomConversationActions = {};
+  bool _oldEnableZoom = true;
+  String? _oldScrollToMessage;
+
+  late Future<String> userAgentFuture;
+
+  @override
+  void initState() {
+    super.initState();
+
+    userAgentFuture = Future.sync(() async {
+      final version = await rootBundle
+          .loadString('packages/talkjs_flutter/assets/version.txt');
+      return 'TalkJS_Flutter/${version.trim().replaceAll('"', '')}';
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -166,6 +207,8 @@ class ChatBoxState extends State<ChatBox> {
       // is being constructed, and the callback may very possibly change the state
       Timer.run(() => widget.onLoadingStateChanged?.call(LoadingState.loading));
 
+      _updateEnableZoom();
+
       execute('let chatBox;');
       execute('''
         function customMessageActionHandler(event) {
@@ -173,25 +216,51 @@ class ChatBoxState extends State<ChatBox> {
         }
       ''');
 
-      createSession(execute: execute, session: widget.session, variableName: getUserVariableName(widget.session.me));
+      execute('''
+        function customConversationActionHandler(event) {
+          window.flutter_inappwebview.callHandler("JSCCustomConversationAction", JSON.stringify(event));
+        }
+      ''');
+
+      // Use Web Visibility API to notify the backend when the UI/WebView is in focus
+      execute(
+          'document.addEventListener("visibilitychange", () => chatBox.onWindowVisibleChanged(document.visibilityState === "visible"));');
+
+      createSession(
+          execute: execute,
+          session: widget.session,
+          variableName: getUserVariableName(widget.session.me));
       _createChatBox();
       // messageFilter and highlightedWords are set as options for the chatbox
       _createConversation();
 
-      execute('chatBox.mount(document.getElementById("talkjs-container")).then(() => window.flutter_inappwebview.callHandler("JSCLoadingState", "loaded"));');
+      execute('''
+        chatBox.mount(document.getElementById("talkjs-container")).then(() => {
+          window.flutter_inappwebview.callHandler("JSCLoadingState", "loaded");
+
+          // Notify the backend of the UI's focus state
+          setTimeout(() => chatBox.onWindowVisibleChanged(document.visibilityState === "visible"), 1000);
+        });
+      '''
+          .trim());
     } else {
       // If it's not the first time that the widget is built,
       // then check what needs to be rebuilt
+
+      if (widget.enableZoom != _oldEnableZoom) {
+        _updateEnableZoom();
+      }
 
       // TODO: If something has changed in the Session we should do something
 
       final chatBoxRecreated = _checkRecreateChatBox();
 
       if (chatBoxRecreated) {
-      // messageFilter and highlightedWords are set as options for the chatbox
+        // messageFilter and highlightedWords are set as options for the chatbox
         _createConversation();
       } else {
-        _checkActionHandlers();
+        _checkMessageActionHandlers();
+        _checkConversationActionHandlers();
         _checkMessageFilter();
         _checkHighlightedWords();
         _checkRecreateConversation();
@@ -199,61 +268,114 @@ class ChatBoxState extends State<ChatBox> {
 
       // Mount the chatbox only if it's new (else the existing chatbox has already been mounted)
       if (chatBoxRecreated) {
-        execute('chatBox.mount(document.getElementById("talkjs-container"));');
+        execute('''
+          chatBox.mount(document.getElementById("talkjs-container")).then(() => {
+            // Notify the backend of the UI's focus state
+            setTimeout(() => chatBox.onWindowVisibleChanged(document.visibilityState === "visible"), 1000);
+          });
+        '''
+            .trim());
       }
     }
 
-    return InAppWebView(
-      initialSettings: InAppWebViewSettings(
-        useHybridComposition: true,
-        disableInputAccessoryView: true,
-        transparentBackground: true,
-        useShouldOverrideUrlLoading: true,
-      ),
-      onWebViewCreated: _onWebViewCreated,
-      onLoadStop: _onLoadStop,
-      onConsoleMessage: (InAppWebViewController controller, ConsoleMessage message) {
-        print("chatbox [${message.messageLevel}] ${message.message}");
-      },
-      gestureRecognizers: {
-        // We need only the VerticalDragGestureRecognizer in order to be able to scroll through the messages
-        Factory(() => VerticalDragGestureRecognizer()),
-      },
-      onGeolocationPermissionsShowPrompt: (InAppWebViewController controller, String origin) async {
-        print("📘 chatbox onGeolocationPermissionsShowPrompt ($origin)");
+    return FutureBuilder(
+        future: userAgentFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.done) {
+            return InAppWebView(
+              initialSettings: InAppWebViewSettings(
+                  useHybridComposition: true,
+                  disableInputAccessoryView: true,
+                  transparentBackground: true,
+                  useShouldOverrideUrlLoading: true,
+                  applicationNameForUserAgent: snapshot.data),
+              onWebViewCreated: _onWebViewCreated,
+              onLoadStop: _onLoadStop,
+              onConsoleMessage:
+                  (InAppWebViewController controller, ConsoleMessage message) {
+                print("chatbox [${message.messageLevel}] ${message.message}");
+              },
+              gestureRecognizers: {
+                // We need only the VerticalDragGestureRecognizer in order to be able to scroll through the messages
+                Factory(() => VerticalDragGestureRecognizer()),
+              },
+              onGeolocationPermissionsShowPrompt:
+                  (InAppWebViewController controller, String origin) async {
+                print(
+                    "📘 chatbox onGeolocationPermissionsShowPrompt ($origin)");
 
-        final granted = await Permission.location.request().isGranted;
+                final granted = await Permission.location.request().isGranted;
 
-        return GeolocationPermissionShowPromptResponse(origin: origin, allow: granted, retain: true);
-      },
-      onPermissionRequest: (InAppWebViewController controller, PermissionRequest permissionRequest) async {
-        print("📘 chatbox onPermissionRequest");
+                return GeolocationPermissionShowPromptResponse(
+                    origin: origin, allow: granted, retain: true);
+              },
+              onPermissionRequest: (InAppWebViewController controller,
+                  PermissionRequest permissionRequest) async {
+                print("📘 chatbox onPermissionRequest");
 
-        var granted = false;
+                var granted = false;
 
-        if (permissionRequest.resources.indexOf(PermissionResourceType.MICROPHONE) >= 0) {
-          granted = await Permission.microphone.request().isGranted;
-        }
+                if (permissionRequest.resources
+                        .indexOf(PermissionResourceType.MICROPHONE) >=
+                    0) {
+                  granted = await Permission.microphone.request().isGranted;
+                }
 
-        return PermissionResponse(resources: permissionRequest.resources, action: granted ? PermissionResponseAction.GRANT : PermissionResponseAction.DENY);
-      },
-      shouldOverrideUrlLoading: (InAppWebViewController controller, NavigationAction navigationAction) async {
-        final overridden = widget.overrideUrlLoading == null ? false : await widget.overrideUrlLoading!(navigationAction.request.url!);
-        if (!overridden) {
-          if (navigationAction.navigationType == NavigationType.LINK_ACTIVATED) {
-            if (await launchUrl(navigationAction.request.url!)) {
-              // We launched the browser, so we don't navigate to the URL in the WebView
-              return NavigationActionPolicy.CANCEL;
-            } else {
-              // We couldn't launch the external browser, so as a fallback we're using the default action
-              return NavigationActionPolicy.ALLOW;
-            }
+                return PermissionResponse(
+                    resources: permissionRequest.resources,
+                    action: granted
+                        ? PermissionResponseAction.GRANT
+                        : PermissionResponseAction.DENY);
+              },
+              shouldOverrideUrlLoading: (InAppWebViewController controller,
+                  NavigationAction navigationAction) async {
+                if (Platform.isAndroid ||
+                    (navigationAction.navigationType ==
+                        NavigationType.LINK_ACTIVATED)) {
+                  // NavigationType is only present in iOS devices (Also MacOS but our SDK doesn't support it.)
+
+                  final webUri =
+                      navigationAction.request.url ?? WebUri("about:blank");
+
+                  // If onUrlNavigation is null we default to allowing the navigation request.
+                  final urlNavigationAction = widget.onUrlNavigation
+                          ?.call(UrlNavigationRequest(webUri.rawValue)) ??
+                      UrlNavigationAction.allow;
+
+                  if (urlNavigationAction == UrlNavigationAction.deny) {
+                    return NavigationActionPolicy.CANCEL;
+                  }
+
+                  if (await launchUrl(webUri,
+                      mode: LaunchMode.externalApplication)) {
+                    // We launched the browser, so we don't navigate to the URL in the WebView
+                    return NavigationActionPolicy.CANCEL;
+                  } else {
+                    // We couldn't launch the external browser, so as a fallback we're using the default action
+                    return NavigationActionPolicy.ALLOW;
+                  }
+                }
+
+                return NavigationActionPolicy.ALLOW;
+              },
+            );
           }
-          return NavigationActionPolicy.ALLOW;
-        }
-        return NavigationActionPolicy.CANCEL;
-      },
-    );
+
+          // Return an empty widget otherwise
+          return SizedBox.shrink();
+        });
+  }
+
+  void _updateEnableZoom() {
+    var content = 'width=device-width, initial-scale=1.0';
+    if (!widget.enableZoom) {
+      content += ', user-scalable=no';
+    }
+
+    execute(
+        '''document.querySelector('meta[name="viewport"]').setAttribute("content", "${content}");''');
+
+    _oldEnableZoom = widget.enableZoom;
   }
 
   void _createChatBox() {
@@ -263,24 +385,40 @@ class ChatBoxState extends State<ChatBox> {
       showChatHeader: widget.showChatHeader,
       showTranslationToggle: widget.showTranslationToggle,
       theme: widget.theme,
+      themeOptions: widget.themeOptions,
       translateConversations: widget.translateConversations,
     );
 
-    _oldHighlightedWords = List<String>.of(widget.highlightedWords);
-    _oldMessageFilter = MessagePredicate.of(widget.messageFilter);
+    execute('chatBox = session.createChatbox(${_oldOptions});');
 
-    execute('chatBox = session.createChatbox(${_oldOptions!.getJsonString(this)});');
+    _setMessageFilter();
+    _setHighlightedWords();
 
-    execute('chatBox.onSendMessage((event) => window.flutter_inappwebview.callHandler("JSCSendMessage", JSON.stringify(event)));');
-    execute('chatBox.onTranslationToggled((event) => window.flutter_inappwebview.callHandler("JSCTranslationToggled", JSON.stringify(event)));');
+    execute(
+        'chatBox.onSendMessage((event) => window.flutter_inappwebview.callHandler("JSCSendMessage", JSON.stringify(event)));');
+    execute(
+        'chatBox.onTranslationToggled((event) => window.flutter_inappwebview.callHandler("JSCTranslationToggled", JSON.stringify(event)));');
 
     if (widget.onCustomMessageAction != null) {
-      _oldCustomActions = Set<String>.of(widget.onCustomMessageAction!.keys);
-      for (var action in _oldCustomActions) {
-        execute('chatBox.onCustomMessageAction("$action", customMessageActionHandler);');
+      _oldCustomMessageActions =
+          Set<String>.of(widget.onCustomMessageAction!.keys);
+      for (var action in _oldCustomMessageActions) {
+        execute(
+            'chatBox.onCustomMessageAction("$action", customMessageActionHandler);');
       }
     } else {
-      _oldCustomActions = {};
+      _oldCustomMessageActions = {};
+    }
+
+    if (widget.onCustomConversationAction != null) {
+      _oldCustomConversationActions =
+          Set<String>.of(widget.onCustomConversationAction!.keys);
+      for (var action in _oldCustomConversationActions) {
+        execute(
+            'chatBox.onCustomConversationAction("$action", customConversationActionHandler);');
+      }
+    } else {
+      _oldCustomConversationActions = {};
     }
   }
 
@@ -304,7 +442,7 @@ class ChatBoxState extends State<ChatBox> {
     }
   }
 
-  bool _checkActionHandlers() {
+  bool _checkMessageActionHandlers() {
     // If there are no handlers specified, then we don't need to create new handlers
     if (widget.onCustomMessageAction == null) {
       return false;
@@ -312,7 +450,7 @@ class ChatBoxState extends State<ChatBox> {
 
     var customActions = Set<String>.of(widget.onCustomMessageAction!.keys);
 
-    if (!setEquals(customActions, _oldCustomActions)) {
+    if (!setEquals(customActions, _oldCustomMessageActions)) {
       var retval = false;
 
       // Register only the new event handlers
@@ -321,15 +459,47 @@ class ChatBoxState extends State<ChatBox> {
       // This should not be a big problem in practice, as it is *very* rare that
       // custom message handlers are being constantly changed
       for (var action in customActions) {
-        if (!_oldCustomActions.contains(action)) {
-          _oldCustomActions.add(action);
+        if (!_oldCustomMessageActions.contains(action)) {
+          _oldCustomMessageActions.add(action);
 
-          execute('chatBox.onCustomMessageAction("$action", customMessageActionHandler);');
+          execute(
+              'chatBox.onCustomMessageAction("$action", customMessageActionHandler);');
 
           retval = true;
         }
       }
+      return retval;
+    } else {
+      return false;
+    }
+  }
 
+  bool _checkConversationActionHandlers() {
+    // If there are no handlers specified, then we don't need to create new handlers
+    if (widget.onCustomConversationAction == null) {
+      return false;
+    }
+
+    var customActions = Set<String>.of(widget.onCustomConversationAction!.keys);
+
+    if (!setEquals(customActions, _oldCustomConversationActions)) {
+      var retval = false;
+
+      // Register only the new event handlers
+      //
+      // Possible memory leak: old event handlers are not getting unregistered
+      // This should not be a big problem in practice, as it is *very* rare that
+      // custom conversation handlers are being constantly changed
+      for (var action in customActions) {
+        if (!_oldCustomConversationActions.contains(action)) {
+          _oldCustomConversationActions.add(action);
+
+          execute(
+              'chatBox.onCustomConversationAction("$action", customConversationActionHandler);');
+
+          retval = true;
+        }
+      }
       return retval;
     } else {
       return false;
@@ -337,27 +507,35 @@ class ChatBoxState extends State<ChatBox> {
   }
 
   void _createConversation() {
-      final result = <String, dynamic>{};
+    final result = <String, dynamic>{};
 
-      _oldAsGuest = widget.asGuest;
-      if (_oldAsGuest != null) {
-        result['asGuest'] = _oldAsGuest;
-      }
+    _oldAsGuest = widget.asGuest;
+    if (_oldAsGuest != null) {
+      result['asGuest'] = _oldAsGuest;
+    }
 
-      _oldConversation = widget.conversation;
-      if (_oldConversation != null) {
-        execute('chatBox.select(${getConversationVariableName(_oldConversation!)}, ${json.encode(result)});');
+    _oldScrollToMessage = widget.scrollToMessage;
+    if (_oldScrollToMessage != null) {
+      result['messageId'] = _oldScrollToMessage;
+    }
+
+    _oldConversation = widget.conversation;
+    if (_oldConversation != null) {
+      execute(
+          'chatBox.select(${getConversationVariableName(_oldConversation!)}, ${json.encode(result)});');
+    } else {
+      if (result.isNotEmpty) {
+        execute('chatBox.select(undefined, ${json.encode(result)});');
       } else {
-        if (result.isNotEmpty) {
-          execute('chatBox.select(undefined, ${json.encode(result)});');
-        } else {
-          execute('chatBox.select(undefined);');
-        }
+        execute('chatBox.select(undefined);');
       }
+    }
   }
 
   bool _checkRecreateConversation() {
-    if ((widget.asGuest != _oldAsGuest) || (widget.conversation != _oldConversation)) {
+    if ((widget.asGuest != _oldAsGuest) ||
+        (widget.conversation != _oldConversation) ||
+        (widget.scrollToMessage != _oldScrollToMessage)) {
       _createConversation();
 
       return true;
@@ -367,9 +545,10 @@ class ChatBoxState extends State<ChatBox> {
   }
 
   void _setHighlightedWords() {
-      _oldHighlightedWords = List<String>.of(widget.highlightedWords);
+    _oldHighlightedWords = List<String>.of(widget.highlightedWords);
 
-      execute('chatBox.setHighlightedWords(${json.encode(_oldHighlightedWords)});');
+    execute(
+        'chatBox.setHighlightedWords(${json.encode(_oldHighlightedWords)});');
   }
 
   bool _checkHighlightedWords() {
@@ -383,9 +562,13 @@ class ChatBoxState extends State<ChatBox> {
   }
 
   void _setMessageFilter() {
-      _oldMessageFilter = MessagePredicate.of(widget.messageFilter);
+    _oldMessageFilter = widget.messageFilter?.clone();
 
+    if (_oldMessageFilter != null) {
       execute('chatBox.setMessageFilter(${json.encode(_oldMessageFilter)});');
+    } else {
+      execute('chatBox.setMessageFilter({});');
+    }
   }
 
   bool _checkMessageFilter() {
@@ -403,13 +586,25 @@ class ChatBoxState extends State<ChatBox> {
       print('📗 chatbox._onWebViewCreated');
     }
 
-    controller.addJavaScriptHandler(handlerName: 'JSCSendMessage', callback: _jscSendMessage);
-    controller.addJavaScriptHandler(handlerName: 'JSCTranslationToggled', callback: _jscTranslationToggled);
-    controller.addJavaScriptHandler(handlerName: 'JSCLoadingState', callback: _jscLoadingState);
-    controller.addJavaScriptHandler(handlerName: 'JSCCustomMessageAction', callback: _jscCustomMessageAction);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCSendMessage', callback: _jscSendMessage);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCTranslationToggled', callback: _jscTranslationToggled);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCLoadingState', callback: _jscLoadingState);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCCustomMessageAction',
+        callback: _jscCustomMessageAction);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCCustomConversationAction',
+        callback: _jscCustomConversationAction);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCTokenFetcher', callback: _jscTokenFetcher);
 
-    String htmlData = await rootBundle.loadString('packages/talkjs_flutter/assets/index.html');
-    controller.loadData(data: htmlData, baseUrl: WebUri("https://app.talkjs.com"));
+    String htmlData = await rootBundle
+        .loadString('packages/talkjs_flutter/assets/index.html');
+    controller.loadData(
+        data: htmlData, baseUrl: WebUri("https://app.talkjs.com"));
   }
 
   void _onLoadStop(InAppWebViewController controller, WebUri? url) async {
@@ -419,15 +614,6 @@ class ChatBoxState extends State<ChatBox> {
 
     if (_webViewController == null) {
       _webViewController = controller;
-
-      // Wait for TalkJS to be ready
-      final js = 'await Talk.ready;';
-
-      if (kDebugMode) {
-        print('📗 chatbox callAsyncJavaScript: $js');
-      }
-
-      await controller.callAsyncJavaScript(functionBody: js);
 
       // Execute any pending instructions
       for (var statement in _pending) {
@@ -457,7 +643,8 @@ class ChatBoxState extends State<ChatBox> {
       print('📗 chatbox._jscTranslationToggled: $message');
     }
 
-    widget.onTranslationToggled?.call(TranslationToggledEvent.fromJson(json.decode(message)));
+    widget.onTranslationToggled
+        ?.call(TranslationToggledEvent.fromJson(json.decode(message)));
   }
 
   void _jscLoadingState(List<dynamic> arguments) {
@@ -480,7 +667,30 @@ class ChatBoxState extends State<ChatBox> {
     Map<String, dynamic> jsonMessage = json.decode(message);
     String action = jsonMessage['action'];
 
-    widget.onCustomMessageAction?[action]?.call(MessageActionEvent.fromJson(jsonMessage));
+    widget.onCustomMessageAction?[action]
+        ?.call(MessageActionEvent.fromJson(jsonMessage));
+  }
+
+  void _jscCustomConversationAction(List<dynamic> arguments) {
+    final conversationData = arguments[0];
+
+    if (kDebugMode) {
+      print('📗 chatbox._jscCustomConversationAction: $conversationData');
+    }
+
+    Map<String, dynamic> jsonConversationData = json.decode(conversationData);
+    String action = jsonConversationData['action'];
+
+    widget.onCustomConversationAction?[action]
+        ?.call(ConversationActionEvent.fromJson(jsonConversationData));
+  }
+
+  Future<String> _jscTokenFetcher(List<dynamic> arguments) {
+    if (kDebugMode) {
+      print('📗 chatbox._jscTokenFetcher');
+    }
+
+    return widget.session.tokenFetcher!();
   }
 
   /// For internal use only. Implementation detail that may change anytime.
@@ -526,7 +736,8 @@ class ChatBoxState extends State<ChatBox> {
 
       _conversations[conversation.id] = variableName;
 
-      execute('let $variableName = session.getOrCreateConversation("${conversation.id}")');
+      execute(
+          'let $variableName = session.getOrCreateConversation("${conversation.id}")');
 
       _setConversationAttributes(variableName, conversation);
       _setConversationParticipants(variableName, conversation);
@@ -537,7 +748,8 @@ class ChatBoxState extends State<ChatBox> {
 
       _setConversationAttributes(variableName, conversation);
 
-      if (!setEquals(conversation.participants, _conversationObjs[conversation.id]!.participants)) {
+      if (!setEquals(conversation.participants,
+          _conversationObjs[conversation.id]!.participants)) {
         _setConversationParticipants(variableName, conversation);
       }
 
@@ -547,7 +759,8 @@ class ChatBoxState extends State<ChatBox> {
     return _conversations[conversation.id]!;
   }
 
-  void _setConversationAttributes(String variableName, Conversation conversation) {
+  void _setConversationAttributes(
+      String variableName, Conversation conversation) {
     final attributes = <String, dynamic>{};
 
     if (conversation.custom != null) {
@@ -571,7 +784,8 @@ class ChatBoxState extends State<ChatBox> {
     }
   }
 
-  void _setConversationParticipants(String variableName, Conversation conversation) {
+  void _setConversationParticipants(
+      String variableName, Conversation conversation) {
     for (var participant in conversation.participants) {
       final userVariableName = getUserVariableName(participant.user);
       final result = <String, dynamic>{};
@@ -584,17 +798,9 @@ class ChatBoxState extends State<ChatBox> {
         result['notify'] = participant.notify!.getValue();
       }
 
-      execute('$variableName.setParticipant($userVariableName, ${json.encode(result)});');
+      execute(
+          '$variableName.setParticipant($userVariableName, ${json.encode(result)});');
     }
-  }
-
-  /// For internal use only. Implementation detail that may change anytime.
-  ///
-  /// Sets the options for ChatBoxOptions for the properties where there exists
-  /// both a declarative option and an imperative method
-  void setExtraOptions(Map<String, dynamic> result) {
-    result['highlightedWords'] = widget.highlightedWords;
-    result['messageFilter'] = widget.messageFilter;
   }
 
   /// For internal use only. Implementation detail that may change anytime.
@@ -618,4 +824,3 @@ class ChatBoxState extends State<ChatBox> {
     }
   }
 }
-

@@ -15,8 +15,10 @@ import './user.dart';
 import './predicate.dart';
 import './chatbox.dart';
 import './webview_common.dart';
+import './themeoptions.dart';
 
-typedef SelectConversationHandler = void Function(SelectConversationEvent event);
+typedef SelectConversationHandler = void Function(
+    SelectConversationEvent event);
 
 class SelectConversationEvent {
   final ConversationData conversation;
@@ -24,9 +26,11 @@ class SelectConversationEvent {
   final List<UserData> others;
 
   SelectConversationEvent.fromJson(Map<String, dynamic> json)
-    : conversation = ConversationData.fromJson(json['conversation']),
-    me = UserData.fromJson(json['me']),
-    others = json['others'].map<UserData>((user) => UserData.fromJson(user)).toList();
+      : conversation = ConversationData.fromJson(json['conversation']),
+        me = UserData.fromJson(json['me']),
+        others = json['others']
+            .map<UserData>((user) => UserData.fromJson(user))
+            .toList();
 }
 
 class ConversationListOptions {
@@ -49,27 +53,27 @@ class ConversationListOptions {
 
   /// Overrides the theme used for this chat UI.
   final String? theme;
+  final ThemeOptions? themeOptions;
 
-  const ConversationListOptions({this.showFeedHeader, this.theme});
+  const ConversationListOptions({
+    this.showFeedHeader,
+    this.theme,
+    this.themeOptions,
+  });
 
-  /// For internal use only. Implementation detail that may change anytime.
-  ///
-  /// This method is used instead of toJson for coherence with ChatBoxOptions.
-  /// The toJson method is intentionally omitted, to produce an error if
-  /// someone tries to convert this object to JSON instead of using the
-  /// getJsonString method.
-  String getJsonString(ConversationListState conversationList) {
+  @override
+  String toString() {
     final result = <String, dynamic>{};
 
     if (showFeedHeader != null) {
       result['showFeedHeader'] = showFeedHeader;
     }
 
-    if (theme != null) {
+    if (themeOptions != null) {
+      result['theme'] = themeOptions?.toJson();
+    } else if (theme != null) {
       result['theme'] = theme;
     }
-
-    conversationList.setExtraOptions(result);
 
     return json.encode(result);
   }
@@ -78,11 +82,14 @@ class ConversationListOptions {
 class ConversationList extends StatefulWidget {
   final Session session;
 
+  final bool enableZoom;
+
   final bool? showFeedHeader;
 
   final String? theme;
+  final ThemeOptions? themeOptions;
 
-  final ConversationPredicate feedFilter;
+  final BaseConversationPredicate? feedFilter;
 
   final SelectConversationHandler? onSelectConversation;
   final LoadingStateHandler? onLoadingStateChanged;
@@ -90,9 +97,11 @@ class ConversationList extends StatefulWidget {
   const ConversationList({
     Key? key,
     required this.session,
+    this.enableZoom = false,
     this.showFeedHeader,
     this.theme,
-    this.feedFilter = const ConversationPredicate(),
+    this.themeOptions,
+    this.feedFilter,
     this.onSelectConversation,
     this.onLoadingStateChanged,
   }) : super(key: key);
@@ -117,7 +126,21 @@ class ConversationListState extends State<ConversationList> {
   final _users = <String, String>{};
 
   /// Objects stored for comparing changes
-  ConversationPredicate _oldFeedFilter = const ConversationPredicate();
+  BaseConversationPredicate? _oldFeedFilter;
+  bool _oldEnableZoom = true;
+
+  late Future<String> userAgentFuture;
+
+  @override
+  void initState() {
+    super.initState();
+
+    userAgentFuture = Future.sync(() async {
+      final version = await rootBundle
+          .loadString('packages/talkjs_flutter/assets/version.txt');
+      return 'TalkJS_Flutter/${version.trim().replaceAll('"', '')}';
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -136,46 +159,80 @@ class ConversationListState extends State<ConversationList> {
       // is being constructed, and the callback may very possibly change the state
       Timer.run(() => widget.onLoadingStateChanged?.call(LoadingState.loading));
 
-      createSession(execute: execute, session: widget.session, variableName: getUserVariableName(widget.session.me));
+      _updateEnableZoom();
+
+      createSession(
+          execute: execute,
+          session: widget.session,
+          variableName: getUserVariableName(widget.session.me));
       _createConversationList();
       // feedFilter is set as an option for the inbox
 
-      execute('conversationList.mount(document.getElementById("talkjs-container")).then(() => window.flutter_inappwebview.callHandler("JSCLoadingState", "loaded"));');
+      execute(
+          'conversationList.mount(document.getElementById("talkjs-container")).then(() => window.flutter_inappwebview.callHandler("JSCLoadingState", "loaded"));');
     } else {
       // If it's not the first time that the widget is built,
       // then check what needs to be rebuilt
+
+      if (widget.enableZoom != _oldEnableZoom) {
+        _updateEnableZoom();
+      }
 
       // TODO: If something has changed in the Session we should do something
       _checkFeedFilter();
     }
 
-    return InAppWebView(
-      initialSettings: InAppWebViewSettings(
-        useHybridComposition: true,
-        disableInputAccessoryView: true,
-        transparentBackground: true,
-      ),
-      onWebViewCreated: _onWebViewCreated,
-      onLoadStop: _onLoadStop,
-      onConsoleMessage: (InAppWebViewController controller, ConsoleMessage message) {
-        print("conversationlist [${message.messageLevel}] ${message.message}");
-      },
-      gestureRecognizers: {
-        // We need only the VerticalDragGestureRecognizer in order to be able to scroll through the conversations
-        Factory(() => VerticalDragGestureRecognizer()),
-      },
-    );
+    return FutureBuilder(
+        future: userAgentFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.done) {
+            return InAppWebView(
+              initialSettings: InAppWebViewSettings(
+                  useHybridComposition: true,
+                  disableInputAccessoryView: true,
+                  transparentBackground: true,
+                  applicationNameForUserAgent: snapshot.data),
+              onWebViewCreated: _onWebViewCreated,
+              onLoadStop: _onLoadStop,
+              onConsoleMessage:
+                  (InAppWebViewController controller, ConsoleMessage message) {
+                print(
+                    "conversationlist [${message.messageLevel}] ${message.message}");
+              },
+              gestureRecognizers: {
+                // We need only the VerticalDragGestureRecognizer in order to be able to scroll through the conversations
+                Factory(() => VerticalDragGestureRecognizer()),
+              },
+            );
+          }
+
+          // Return an empty widget otherwise
+          return SizedBox.shrink();
+        });
+  }
+
+  void _updateEnableZoom() {
+    var content = 'width=device-width, initial-scale=1.0';
+    if (!widget.enableZoom) {
+      content += ', user-scalable=no';
+    }
+
+    execute(
+        '''document.querySelector('meta[name="viewport"]').setAttribute("content", "${content}");''');
+
+    _oldEnableZoom = widget.enableZoom;
   }
 
   void _createConversationList() {
     final options = ConversationListOptions(
       showFeedHeader: widget.showFeedHeader,
       theme: widget.theme,
+      themeOptions: widget.themeOptions,
     );
 
-    _oldFeedFilter = ConversationPredicate.of(widget.feedFilter);
+    execute('const conversationList = session.createInbox(${options});');
 
-    execute('const conversationList = session.createInbox(${options.getJsonString(this)});');
+    _setFeedFilter();
 
     execute('''conversationList.onSelectConversation((event) => {
       event.preventDefault();
@@ -184,9 +241,14 @@ class ConversationListState extends State<ConversationList> {
   }
 
   void _setFeedFilter() {
-      _oldFeedFilter = ConversationPredicate.of(widget.feedFilter);
+    _oldFeedFilter = widget.feedFilter?.clone();
 
-      execute('conversationList.setFeedFilter(${json.encode(_oldFeedFilter)});');
+    if (_oldFeedFilter != null) {
+      execute(
+          'conversationList.setFeedFilter(${json.encode(_oldFeedFilter)});');
+    } else {
+      execute('conversationList.setFeedFilter({});');
+    }
   }
 
   bool _checkFeedFilter() {
@@ -204,11 +266,17 @@ class ConversationListState extends State<ConversationList> {
       print('📗 conversationlist._onWebViewCreated');
     }
 
-    controller.addJavaScriptHandler(handlerName: 'JSCSelectConversation', callback: _jscSelectConversation);
-    controller.addJavaScriptHandler(handlerName: 'JSCLoadingState', callback: _jscLoadingState);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCSelectConversation', callback: _jscSelectConversation);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCLoadingState', callback: _jscLoadingState);
+    controller.addJavaScriptHandler(
+        handlerName: 'JSCTokenFetcher', callback: _jscTokenFetcher);
 
-    String htmlData = await rootBundle.loadString('packages/talkjs_flutter/assets/index.html');
-    controller.loadData(data: htmlData, baseUrl: WebUri("https://app.talkjs.com"));
+    String htmlData = await rootBundle
+        .loadString('packages/talkjs_flutter/assets/index.html');
+    controller.loadData(
+        data: htmlData, baseUrl: WebUri("https://app.talkjs.com"));
   }
 
   void _onLoadStop(InAppWebViewController controller, WebUri? url) async {
@@ -218,15 +286,6 @@ class ConversationListState extends State<ConversationList> {
 
     if (_webViewController == null) {
       _webViewController = controller;
-
-      // Wait for TalkJS to be ready
-      final js = 'await Talk.ready;';
-
-      if (kDebugMode) {
-        print('📗 conversationlist callAsyncJavaScript: $js');
-      }
-
-      await controller.callAsyncJavaScript(functionBody: js);
 
       // Execute any pending instructions
       for (var statement in _pending) {
@@ -246,7 +305,8 @@ class ConversationListState extends State<ConversationList> {
       print('📗 conversationlist._jscSelectConversation: $message');
     }
 
-    widget.onSelectConversation?.call(SelectConversationEvent.fromJson(json.decode(message)));
+    widget.onSelectConversation
+        ?.call(SelectConversationEvent.fromJson(json.decode(message)));
   }
 
   void _jscLoadingState(List<dynamic> arguments) {
@@ -257,6 +317,14 @@ class ConversationListState extends State<ConversationList> {
     }
 
     widget.onLoadingStateChanged?.call(LoadingState.loaded);
+  }
+
+  Future<String> _jscTokenFetcher(List<dynamic> arguments) {
+    if (kDebugMode) {
+      print('📗 conversationlist._jscTokenFetcher');
+    }
+
+    return widget.session.tokenFetcher!();
   }
 
   /// For internal use only. Implementation detail that may change anytime.
@@ -288,14 +356,6 @@ class ConversationListState extends State<ConversationList> {
 
   /// For internal use only. Implementation detail that may change anytime.
   ///
-  /// Sets the options for ConversationListOptions for the properties where there exists
-  /// both a declarative option and an imperative method
-  void setExtraOptions(Map<String, dynamic> result) {
-    result['feedFilter'] = widget.feedFilter;
-  }
-
-  /// For internal use only. Implementation detail that may change anytime.
-  ///
   /// Evaluates the JavaScript statement given.
   void execute(String statement) {
     final controller = _webViewController;
@@ -320,4 +380,3 @@ class ConversationListState extends State<ConversationList> {
     execute('conversationList.destroy();');
   }
 }
-
